@@ -6,9 +6,8 @@ build-backend = "setuptools.build_meta"
 name = "avathon-supply-chain-agents"
 version = "0.1.0"
 description = "Auditable multi-agent supply-chain disruption triage"
-requires-python = ">=3.11,<3.12"
+requires-python = ">=3.12,<3.13"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]
-

@@ -24,7 +24,9 @@ def _poisson_like(mean: float, rng: random.Random) -> int:
     return max(0, round(rng.gauss(intensity, intensity**0.5)))
 
 
-def generate(output_dir: Path, seed: int = 42, days: int = 70) -> None:
+def generate(
+    output_dir: Path, seed: int = 42, days: int = 70, scenario: str = "success"
+) -> None:
     """Write four CSVs and a manifest. Day 70 includes an injected supplier delay."""
     rng = random.Random(seed)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -66,7 +68,7 @@ def generate(output_dir: Path, seed: int = 42, days: int = 70) -> None:
     for index, (supplier, standard_lead_days) in enumerate(SUPPLIERS, start=1):
         sku = "SKU-CRITICAL" if supplier == "SUP-A" else "SKU-STABLE"
         po_id = f"PO-{index:03d}"
-        expected = start + timedelta(days=days - (8 if supplier == "SUP-A" else 3))
+        expected = start + timedelta(days=days - (2 if supplier == "SUP-A" else 1))
         actual = expected + timedelta(days=5 if supplier == "SUP-A" else 0)
         po_rows.append(
             {
@@ -91,6 +93,18 @@ def generate(output_dir: Path, seed: int = 42, days: int = 70) -> None:
             }
         )
 
+    if scenario == "conflicting_evidence":
+        shipment_rows.append(
+            {
+                "po_id": "PO-001",
+                "supplier": "SUP-A",
+                "reported_date": (start + timedelta(days=days - 1)).isoformat(),
+                "eta_date": (start + timedelta(days=days + 1)).isoformat(),
+                "shipment_status": "on_time",
+                "source_quality": "unverified",
+            }
+        )
+
     _write_csv(output_dir / "daily_demand.csv", demand_rows)
     _write_csv(output_dir / "inventory.csv", inventory_rows)
     _write_csv(output_dir / "purchase_orders.csv", po_rows)
@@ -98,6 +112,7 @@ def generate(output_dir: Path, seed: int = 42, days: int = 70) -> None:
     (output_dir / "manifest.txt").write_text(
         "seed=42\n"
         "demand=gamma-poisson approximation with weekday seasonality\n"
+        f"scenario={scenario}\n"
         "injected_event=SUP-A delayed 5 days for SKU-CRITICAL to Pune-DC\n"
         "known_limitations=synthetic data does not represent contracts, capacities, or ERP errors\n",
         encoding="utf-8",
@@ -116,5 +131,8 @@ if __name__ == "__main__":
     parser.add_argument("--output-dir", type=Path, default=Path("data/generated"))
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--days", type=int, default=70)
+    parser.add_argument(
+        "--scenario", choices=["success", "conflicting_evidence"], default="success"
+    )
     args = parser.parse_args()
-    generate(args.output_dir, seed=args.seed, days=args.days)
+    generate(args.output_dir, seed=args.seed, days=args.days, scenario=args.scenario)

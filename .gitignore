@@ -1,5 +1,5 @@
 .DS_Store
-.venv/
+.venv*/
 __pycache__/
 *.py[cod]
 .pytest_cache/
@@ -10,4 +10,3 @@ data/generated/*.csv
 results/*.jsonl
 results/*.json
 !results/.gitkeep
-
