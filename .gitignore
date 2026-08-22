@@ -7,6 +7,7 @@ __pycache__/
 htmlcov/
 .env
 data/generated/*.csv
+data/generated/manifest.txt
 results/*.jsonl
 results/*.json
 !results/.gitkeep
