@@ -102,6 +102,20 @@ and approve or reject the simulated action. Choose **Conflicting shipment data:
 fail closed** to confirm that the workflow escalates without proposing an
 action. The interface can download the current trace as JSONL.
 
+### Optional OpenAI tool-calling test
+
+The default workflow is fully deterministic and requires no API key. To test
+GPT selecting the two read-only tools, use **Use GPT for tool selection** in
+the Streamlit sidebar and paste an API key for the current browser session.
+The key is not written to disk, to `.streamlit/secrets.toml`, or to the trace.
+
+In this mode, the model must select the approved tool and exact SKU/site
+arguments. The application validates the proposed function call before it runs
+the local DuckDB query. The trace records the model ID, function-call ID,
+response IDs, validated arguments, query ID, and a short post-tool summary. An
+incorrect tool, invalid arguments, or API error stops the workflow and routes
+to human escalation; it never silently falls back to a recommendation.
+
 ## Safety boundaries
 
 - The DuckDB tooling is read-only from the agent perspective and exposes only

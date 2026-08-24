@@ -6,6 +6,7 @@ __pycache__/
 .coverage
 htmlcov/
 .env
+.streamlit/secrets.toml
 data/generated/*.csv
 data/generated/manifest.txt
 results/*.jsonl

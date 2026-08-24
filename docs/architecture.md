@@ -34,8 +34,12 @@ The trade-off is more explicit graph code and less free-form collaboration.
 
 The SQL tool exposes only two named operations (`supplier_exposure` and
 `demand_history`), clamps the lookback window, uses query parameters for all
-agent inputs, and records a query ID. An LLM could generate planner-facing
-explanations over these structured outputs, but numerical assessments and
+agent inputs, and records a query ID. The Streamlit console can optionally use
+the OpenAI Responses API to make the model select one of those functions. The
+system validates the tool name and all arguments against the approved
+SKU/site/28-day context before calling DuckDB. Each model request and function
+call is traceable by model ID, response IDs, function-call ID, validated
+arguments, query ID, and a short post-tool summary. Numerical assessments and
 execution permissions never depend on unconstrained model text.
 
 ## Message contract

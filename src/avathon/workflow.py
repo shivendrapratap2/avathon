@@ -9,6 +9,7 @@ from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, START, StateGraph
 
 from .agents import DemandImpactAgent, ReplenishmentRecommendationAgent, RiskDetectionEvidenceAgent
+from .llm import OpenAIToolCaller
 from .schemas import AgentMessage, MessageType, WorkflowState
 from .tools import SupplyChainAnalyticsTool
 
@@ -17,19 +18,21 @@ def _append(state: WorkflowState, message: AgentMessage) -> dict:
     return {"messages": [*state.get("messages", []), message.to_dict()]}
 
 
-def build_workflow(data_dir: Path):
+def build_workflow(data_dir: Path, api_key: str | None = None, model: str = "gpt-5.6"):
     """Return a compiled LangGraph graph interrupted before human review."""
     tool = SupplyChainAnalyticsTool(data_dir)
-    risk_agent = RiskDetectionEvidenceAgent(tool)
-    impact_agent = DemandImpactAgent(tool)
+    llm = OpenAIToolCaller(api_key, model) if api_key else None
+    risk_agent = RiskDetectionEvidenceAgent(tool, llm)
+    impact_agent = DemandImpactAgent(tool, llm)
     recommendation_agent = ReplenishmentRecommendationAgent()
 
     def risk_node(state: WorkflowState) -> dict:
-        msg = risk_agent.assess(
+        messages = risk_agent.assess(
             state["trace_id"], state["scenario_id"], state.get("sku", "SKU-CRITICAL"),
             state.get("site", "Pune-DC"),
         )
-        result = _append(state, msg)
+        msg = messages[-1]
+        result = {"messages": [*state.get("messages", []), *[message.to_dict() for message in messages]]}
         if msg.message_type == MessageType.ESCALATION:
             result["escalation_reason"] = msg.payload["reason"]
         else:
@@ -40,8 +43,9 @@ def build_workflow(data_dir: Path):
         return "escalate" if state.get("escalation_reason") else "impact_agent"
 
     def impact_node(state: WorkflowState) -> dict:
-        msg = impact_agent.assess(state["trace_id"], state["scenario_id"], state["risk"])
-        result = _append(state, msg)
+        messages = impact_agent.assess(state["trace_id"], state["scenario_id"], state["risk"])
+        msg = messages[-1]
+        result = {"messages": [*state.get("messages", []), *[message.to_dict() for message in messages]]}
         if msg.message_type == MessageType.ESCALATION:
             result["escalation_reason"] = msg.payload["reason"]
         else:

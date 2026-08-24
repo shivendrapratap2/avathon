@@ -65,12 +65,12 @@ def message_rows(messages: list[dict]) -> list[dict]:
     ]
 
 
-def start_scenario(selection: str) -> None:
+def start_scenario(selection: str, api_key: str | None = None, model: str = "gpt-5.6") -> None:
     """Generate the selected scenario and run until completion or HITL interrupt."""
     scenario = SCENARIOS[selection]
     data_dir = ROOT / "data" / "generated"
     generate(data_dir, scenario=scenario["data_scenario"])
-    graph = build_workflow(data_dir)
+    graph = build_workflow(data_dir, api_key=api_key, model=model)
     config = {"configurable": {"thread_id": f"ui-{uuid4().hex}"}}
     initial = {
         "trace_id": f"ui-{uuid4().hex[:10]}",
@@ -81,7 +81,10 @@ def start_scenario(selection: str) -> None:
         "messages": [],
     }
     graph.invoke(initial, config=config)
-    st.session_state.run = {"graph": graph, "config": config, "selection": selection}
+    st.session_state.run = {
+        "graph": graph, "config": config, "selection": selection,
+        "llm_enabled": bool(api_key), "model": model if api_key else None,
+    }
 
 
 def decide(decision: str) -> None:
@@ -119,8 +122,28 @@ with st.sidebar:
     chosen = SCENARIOS[selection]
     st.caption(chosen["test_name"])
     st.info(chosen["description"])
+    st.divider()
+    st.subheader("LLM tool-calling test")
+    use_llm = st.toggle("Use GPT for tool selection", value=False)
+    api_key = ""
+    model = "gpt-5.6"
+    if use_llm:
+        api_key = st.text_input(
+            "OpenAI API key", type="password",
+            help="Used only in this server session; never written to disk or the trace.",
+        )
+        model = st.text_input(
+            "Model", value=model, help="Use a model ID enabled for your OpenAI API project."
+        )
+        st.caption("The model may select read-only tools only. Invalid tool calls stop the workflow safely.")
     if st.button("Run selected scenario", type="primary", width="stretch"):
-        start_scenario(selection)
+        if use_llm and not api_key:
+            st.error("Enter an OpenAI API key to enable GPT tool calling.")
+        else:
+            try:
+                start_scenario(selection, api_key=api_key or None, model=model)
+            except RuntimeError as error:
+                st.error(str(error))
     if st.button("Clear current run", width="stretch"):
         st.session_state.pop("run", None)
         st.rerun()
@@ -147,6 +170,14 @@ proposal = current.get("proposal")
 awaiting_human = proposal is not None and "human_decision" not in message_types
 has_escalation = "escalation" in message_types
 is_approved = messages and messages[-1]["message_type"] == "action_proposal"
+
+if st.session_state.run["llm_enabled"]:
+    st.success(
+        f"GPT tool selection enabled with `{st.session_state.run['model']}`. "
+        "Tool call IDs and response IDs are included in the trace."
+    )
+else:
+    st.info("Deterministic tool mode: select GPT tool calling in the sidebar to test model-selected, validated tool calls.")
 
 st.divider()
 metric_cols = st.columns(4)
