@@ -87,6 +87,21 @@ Inspect a trace with:
 cat results/trace_success.jsonl
 ```
 
+## Interactive Streamlit console
+
+The repository also includes a visual test console for the two end-to-end
+workflow cases, the complete typed trace, information flow between agents, and
+the mandatory human approval step. From the repository root:
+
+```bash
+streamlit run app.py
+```
+
+Choose **Verified delay: human approval required** to review a recommendation
+and approve or reject the simulated action. Choose **Conflicting shipment data:
+fail closed** to confirm that the workflow escalates without proposing an
+action. The interface can download the current trace as JSONL.
+
 ## Safety boundaries
 
 - The DuckDB tooling is read-only from the agent perspective and exposes only
