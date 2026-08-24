@@ -8,88 +8,148 @@ from typing import Literal
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, START, StateGraph
 
-from .agents import DemandImpactAgent, ReplenishmentRecommendationAgent, RiskDetectionEvidenceAgent
-from .llm import OpenAIToolCaller
-from .schemas import AgentMessage, MessageType, WorkflowState
+from .agents import (
+    AgentOutcome,
+    DemandImpactAgent,
+    ReplenishmentRecommendationAgent,
+    RiskDetectionEvidenceAgent,
+)
+from .llm import DEFAULT_MODEL, LLMPlanner, Planner
+from .schemas import AgentMessage, EscalationType, MessageType, WorkflowState
 from .tools import SupplyChainAnalyticsTool
 
 
-def _append(state: WorkflowState, message: AgentMessage) -> dict:
-    return {"messages": [*state.get("messages", []), message.to_dict()]}
+def build_workflow(
+    data_dir: Path,
+    *,
+    api_key: str | None = None,
+    model: str = DEFAULT_MODEL,
+    planner: Planner | None = None,
+    planner_factory=None,
+):
+    """Return a compiled graph interrupted before human review.
 
-
-def build_workflow(data_dir: Path, api_key: str | None = None, model: str = "gpt-5.6"):
-    """Return a compiled LangGraph graph interrupted before human review."""
+    Exactly one planner source is required: a live ``api_key``, an injected
+    ``planner``, or a ``planner_factory`` mapping an agent name to a planner.
+    There is no unplanned fallback path — a workflow with no planner cannot run,
+    rather than silently degrading into hardcoded behaviour.
+    """
     tool = SupplyChainAnalyticsTool(data_dir)
-    llm = OpenAIToolCaller(api_key, model) if api_key else None
-    risk_agent = RiskDetectionEvidenceAgent(tool, llm)
-    impact_agent = DemandImpactAgent(tool, llm)
-    recommendation_agent = ReplenishmentRecommendationAgent()
+
+    if planner_factory is not None:
+        make = planner_factory
+    elif planner is not None:
+        def make(_agent: str) -> Planner:
+            return planner
+    elif api_key:
+        def make(_agent: str) -> Planner:
+            return LLMPlanner(api_key=api_key, model=model)
+    else:
+        raise ValueError(
+            "build_workflow requires an OpenAI api_key, a planner, or a planner_factory."
+        )
+
+    risk_agent = RiskDetectionEvidenceAgent(tool, make("risk_agent"))
+    impact_agent = DemandImpactAgent(tool, make("impact_agent"))
+    recommendation_agent = ReplenishmentRecommendationAgent(tool, make("replenishment_agent"))
+
+    def _apply(outcome: AgentOutcome, key: str) -> dict:
+        result: dict = {"messages": [message.to_dict() for message in outcome.messages]}
+        if outcome.escalated:
+            result["escalation_reason"] = outcome.escalation_reason
+            result["escalation_type"] = outcome.escalation_type
+        else:
+            result[key] = outcome.payload
+        return result
 
     def risk_node(state: WorkflowState) -> dict:
-        messages = risk_agent.assess(
-            state["trace_id"], state["scenario_id"], state.get("sku", "SKU-CRITICAL"),
-            state.get("site", "Pune-DC"),
+        outcome = risk_agent.assess(
+            state["trace_id"], state["scenario_id"],
+            state.get("sku", "SKU-CRITICAL"), state.get("site", "Pune-DC"),
         )
-        msg = messages[-1]
-        result = {"messages": [*state.get("messages", []), *[message.to_dict() for message in messages]]}
-        if msg.message_type == MessageType.ESCALATION:
-            result["escalation_reason"] = msg.payload["reason"]
-        else:
-            result["risk"] = msg.payload
-        return result
-
-    def route_after_risk(state: WorkflowState) -> Literal["impact_agent", "escalate"]:
-        return "escalate" if state.get("escalation_reason") else "impact_agent"
+        return _apply(outcome, "risk")
 
     def impact_node(state: WorkflowState) -> dict:
-        messages = impact_agent.assess(state["trace_id"], state["scenario_id"], state["risk"])
-        msg = messages[-1]
-        result = {"messages": [*state.get("messages", []), *[message.to_dict() for message in messages]]}
-        if msg.message_type == MessageType.ESCALATION:
-            result["escalation_reason"] = msg.payload["reason"]
-        else:
-            result["impact"] = msg.payload
-        return result
-
-    def route_after_impact(state: WorkflowState) -> Literal["replenishment_agent", "escalate"]:
-        return "escalate" if state.get("escalation_reason") else "replenishment_agent"
+        return _apply(
+            impact_agent.assess(state["trace_id"], state["scenario_id"], state["risk"]),
+            "impact",
+        )
 
     def recommendation_node(state: WorkflowState) -> dict:
-        msg = recommendation_agent.propose(state["trace_id"], state["scenario_id"], state["impact"])
-        result = _append(state, msg)
-        result["proposal"] = msg.payload
-        return result
+        return _apply(
+            recommendation_agent.propose(
+                state["trace_id"], state["scenario_id"], state["impact"]
+            ),
+            "proposal",
+        )
+
+    def route_on_escalation(next_node: str):
+        def route(state: WorkflowState) -> Literal["continue", "escalate"]:
+            return "escalate" if state.get("escalation_type") else "continue"
+        route.__name__ = f"route_to_{next_node}"
+        return route
 
     def human_review_node(state: WorkflowState) -> dict:
         decision = state.get("decision", "pending")
         message = AgentMessage.create(
-            trace_id=state["trace_id"], scenario_id=state["scenario_id"], sender="human_planner",
-            recipient="workflow", message_type=MessageType.HUMAN_DECISION,
-            payload={"decision": decision, "proposal": state["proposal"]}, confidence=1.0,
+            trace_id=state["trace_id"], scenario_id=state["scenario_id"],
+            sender="human_planner", recipient="workflow",
+            message_type=MessageType.HUMAN_DECISION,
+            payload={
+                "decision": decision,
+                "planner_id": state.get("planner_id", "unattributed"),
+                "proposal_action": state["proposal"]["action"],
+                "proposal_quantity": state["proposal"]["quantity"],
+                "proposal_evidence": state["proposal"].get("evidence_chain", []),
+            },
+            evidence_refs=state["proposal"].get("evidence_chain", []), confidence=1.0,
         )
-        return _append(state, message)
+        update: dict = {"messages": [message.to_dict()]}
+        if decision != "approve":
+            update["escalation_type"] = (
+                EscalationType.HUMAN_REJECTED.value if decision == "reject"
+                else EscalationType.HUMAN_NO_DECISION.value
+            )
+            update["escalation_reason"] = (
+                f"Planner '{state.get('planner_id', 'unattributed')}' did not approve "
+                f"the proposed {state['proposal']['action']}."
+            )
+        return update
 
     def route_after_human(state: WorkflowState) -> Literal["finalize", "escalate"]:
         return "finalize" if state.get("decision") == "approve" else "escalate"
 
     def finalize_node(state: WorkflowState) -> dict:
+        proposal = state["proposal"]
         message = AgentMessage.create(
-            trace_id=state["trace_id"], scenario_id=state["scenario_id"], sender="workflow",
-            recipient="audit_log", message_type=MessageType.ACTION_PROPOSAL,
-            payload={**state["proposal"], "execution_status": "approved_for_simulated_execution"},
-            confidence=1.0,
+            trace_id=state["trace_id"], scenario_id=state["scenario_id"],
+            sender="workflow", recipient="audit_log",
+            message_type=MessageType.ACTION_PROPOSAL,
+            payload={
+                **proposal,
+                "execution_status": "approved_for_simulated_execution",
+                "approved_by": state.get("planner_id", "unattributed"),
+            },
+            evidence_refs=proposal.get("evidence_chain", []), confidence=1.0,
         )
-        return _append(state, message)
+        return {"messages": [message.to_dict()]}
 
     def escalate_node(state: WorkflowState) -> dict:
         message = AgentMessage.create(
-            trace_id=state["trace_id"], scenario_id=state["scenario_id"], sender="workflow",
-            recipient="human_planner", message_type=MessageType.ESCALATION,
-            payload={"reason": state.get("escalation_reason", "Human did not approve action.")},
+            trace_id=state["trace_id"], scenario_id=state["scenario_id"],
+            sender="workflow", recipient="human_planner",
+            message_type=MessageType.ESCALATION,
+            payload={
+                "reason": state.get("escalation_reason", "Workflow stopped without approval."),
+                "escalation_type": state.get(
+                    "escalation_type", EscalationType.HUMAN_NO_DECISION.value
+                ),
+                "action_proposed": False,
+                "action_executed": False,
+            },
             confidence=1.0,
         )
-        return _append(state, message)
+        return {"messages": [message.to_dict()]}
 
     graph = StateGraph(WorkflowState)
     graph.add_node("risk_agent", risk_node)
@@ -98,16 +158,23 @@ def build_workflow(data_dir: Path, api_key: str | None = None, model: str = "gpt
     graph.add_node("human_review", human_review_node)
     graph.add_node("finalize", finalize_node)
     graph.add_node("escalate", escalate_node)
+
     graph.add_edge(START, "risk_agent")
     graph.add_conditional_edges(
-        "risk_agent", route_after_risk, {"impact_agent": "impact_agent", "escalate": "escalate"}
+        "risk_agent", route_on_escalation("impact_agent"),
+        {"continue": "impact_agent", "escalate": "escalate"},
     )
     graph.add_conditional_edges(
-        "impact_agent", route_after_impact,
-        {"replenishment_agent": "replenishment_agent", "escalate": "escalate"},
+        "impact_agent", route_on_escalation("replenishment_agent"),
+        {"continue": "replenishment_agent", "escalate": "escalate"},
     )
-    graph.add_edge("replenishment_agent", "human_review")
-    graph.add_conditional_edges("human_review", route_after_human, {"finalize": "finalize", "escalate": "escalate"})
+    graph.add_conditional_edges(
+        "replenishment_agent", route_on_escalation("human_review"),
+        {"continue": "human_review", "escalate": "escalate"},
+    )
+    graph.add_conditional_edges(
+        "human_review", route_after_human, {"finalize": "finalize", "escalate": "escalate"}
+    )
     graph.add_edge("finalize", END)
     graph.add_edge("escalate", END)
     return graph.compile(checkpointer=MemorySaver(), interrupt_before=["human_review"])

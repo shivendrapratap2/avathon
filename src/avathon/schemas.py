@@ -1,26 +1,44 @@
 """Typed contracts for every handoff in the agent workflow.
 
-The design deliberately keeps operational evidence and machine decisions as
-structured data; free-form model text is explanatory, not the system of record.
+Operational evidence and machine decisions stay structured. Model-generated
+text is explanatory only and is never the system of record: it travels in a
+dedicated ``narrative`` field and is never read back by downstream logic.
 """
 
 from __future__ import annotations
 
+import operator
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Any, Literal, TypedDict
+from typing import Annotated, Any, Literal, TypedDict
 from uuid import uuid4
 
 
 class MessageType(str, Enum):
+    PLANNER_STEP = "planner_step"
     TOOL_RESULT = "tool_result"
+    GUARDRAIL_BLOCK = "guardrail_block"
     RISK_ASSESSMENT = "risk_assessment"
     IMPACT_ASSESSMENT = "impact_assessment"
-    ACTION_PROPOSAL = "action_proposal"
     APPROVAL_REQUEST = "approval_request"
     HUMAN_DECISION = "human_decision"
+    ACTION_PROPOSAL = "action_proposal"
     ESCALATION = "escalation"
+
+
+class EscalationType(str, Enum):
+    """Why the workflow stopped. Audit consumers must never string-match reasons."""
+
+    NO_EVIDENCE = "no_evidence"
+    CONFLICTING_EVIDENCE = "conflicting_evidence"
+    UNVERIFIED_EVIDENCE = "unverified_evidence"
+    INSUFFICIENT_HISTORY = "insufficient_history"
+    MISSING_REQUIRED_EVIDENCE = "missing_required_evidence"
+    TOOL_FAILURE = "tool_failure"
+    GUARDRAIL_VIOLATION = "guardrail_violation"
+    HUMAN_REJECTED = "human_rejected"
+    HUMAN_NO_DECISION = "human_no_decision"
 
 
 @dataclass(frozen=True)
@@ -36,6 +54,7 @@ class AgentMessage:
     evidence_refs: list[str] = field(default_factory=list)
     confidence: float = 0.0
     assumptions: list[str] = field(default_factory=list)
+    narrative: str = ""
     timestamp_utc: str = field(
         default_factory=lambda: datetime.now(timezone.utc).isoformat()
     )
@@ -52,14 +71,21 @@ class AgentMessage:
 
 
 class WorkflowState(TypedDict, total=False):
-    """LangGraph state. Only typed messages cross agent boundaries."""
+    """LangGraph state. Only typed messages cross agent boundaries.
+
+    ``messages`` uses an additive reducer so each node returns only the events
+    it produced; nodes never rebuild the full history.
+    """
 
     trace_id: str
     scenario_id: str
+    sku: str
+    site: str
+    planner_id: str
     decision: Literal["approve", "reject", "modify", "pending"]
-    messages: list[dict[str, Any]]
+    messages: Annotated[list[dict[str, Any]], operator.add]
     risk: dict[str, Any]
     impact: dict[str, Any]
     proposal: dict[str, Any]
     escalation_reason: str
-
+    escalation_type: str

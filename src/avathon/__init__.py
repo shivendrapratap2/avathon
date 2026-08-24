@@ -1,4 +1,3 @@
-"""Avathon AI hiring challenge: auditable supply-chain triage agents."""
+"""GPT-planned, policy-bounded supply-chain disruption triage."""
 
-__version__ = "0.1.0"
-
+__version__ = "0.2.0"
